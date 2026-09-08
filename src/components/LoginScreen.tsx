@@ -5,18 +5,27 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { ShieldCheck, User, KeyRound, Lock, ArrowRight, CheckCircle2 } from 'lucide-react';
+import { ShieldCheck, User, KeyRound, Lock, ArrowRight, CheckCircle2, Radio, Key } from 'lucide-react';
 import { UserProfile } from '@/types/chat';
 
 interface LoginScreenProps {
-  onLogin: (profile: UserProfile) => void;
+  onLogin: (profile: UserProfile, targetRoomId?: string, targetPasskey?: string) => void;
   isLoading: boolean;
+  inviteRoomId?: string;
+  invitePasskey?: string;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) => {
+export const LoginScreen: React.FC<LoginScreenProps> = ({
+  onLogin,
+  isLoading,
+  inviteRoomId,
+  invitePasskey
+}) => {
   const [username, setUsername] = useState('');
-  const [accessPin, setAccessPin] = useState('');
+  const [manualPasskey, setManualPasskey] = useState(invitePasskey || '');
   const [errorMsg, setErrorMsg] = useState('');
+
+  const hasInvite = Boolean(inviteRoomId);
 
   const handleLoginSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -24,12 +33,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
 
     const cleanUsername = username.trim();
     if (!cleanUsername) {
-      setErrorMsg('Introduce un nombre de usuario o alias para identificarte.');
+      setErrorMsg('Introduce un nombre o alias para identificarte.');
       return;
     }
 
     if (cleanUsername.length < 2) {
-      setErrorMsg('El nombre de usuario debe contener al menos 2 caracteres.');
+      setErrorMsg('El alias debe contener al menos 2 caracteres.');
+      return;
+    }
+
+    const effectivePasskey = (invitePasskey || manualPasskey).trim();
+
+    if (hasInvite && !effectivePasskey) {
+      setErrorMsg('Debes introducir la clave de cifrado de la sala.');
       return;
     }
 
@@ -39,7 +55,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
       loggedInAt: Date.now()
     };
 
-    onLogin(profile);
+    if (hasInvite && inviteRoomId) {
+      onLogin(profile, inviteRoomId, effectivePasskey);
+    } else {
+      onLogin(profile);
+    }
   };
 
   return (
@@ -51,22 +71,52 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
           </div>
           <div className="space-y-1">
             <CardTitle className="text-lg font-bold tracking-tight text-zinc-100">
-              Acceso a Canal Seguro
+              {hasInvite ? 'Invitación a Canal Seguro' : 'Acceso a Canal Seguro'}
             </CardTitle>
             <CardDescription className="text-xs text-zinc-400">
-              Inicia sesión local protegida para crear o unirte a salas privadas
+              {hasInvite
+                ? `Te han invitado a unirte a una conversación privada y efímera`
+                : 'Inicia sesión local protegida para crear o unirte a salas privadas'}
             </CardDescription>
           </div>
-          <div className="flex items-center justify-center gap-1.5 pt-1">
-            <Badge variant="outline" className="text-[10px] gap-1">
-              <Lock className="w-2.5 h-2.5 text-emerald-400" />
-              E2EE Criptográfico
-            </Badge>
-            <Badge variant="outline" className="text-[10px] gap-1">
-              <CheckCircle2 className="w-2.5 h-2.5 text-zinc-400" />
-              Cero Registros
-            </Badge>
-          </div>
+
+          {hasInvite ? (
+            <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl space-y-1.5 text-left">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-zinc-400 font-medium flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                  Sala de destino:
+                </span>
+                <span className="text-xs font-mono font-bold text-zinc-100 uppercase tracking-wider">
+                  {inviteRoomId}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 pt-0.5">
+                {invitePasskey ? (
+                  <Badge variant="success" className="text-[10px] gap-1">
+                    <CheckCircle2 className="w-2.5 h-2.5" />
+                    Clave E2EE detectada en el enlace
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="text-[10px] gap-1">
+                    <Key className="w-2.5 h-2.5" />
+                    Requiere clave de cifrado
+                  </Badge>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-1.5 pt-1">
+              <Badge variant="outline" className="text-[10px] gap-1">
+                <Lock className="w-2.5 h-2.5 text-emerald-400" />
+                E2EE Criptográfico
+              </Badge>
+              <Badge variant="outline" className="text-[10px] gap-1">
+                <CheckCircle2 className="w-2.5 h-2.5 text-zinc-400" />
+                Cero Registros
+              </Badge>
+            </div>
+          )}
         </CardHeader>
 
         <form onSubmit={handleLoginSubmit}>
@@ -74,11 +124,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
             <div className="space-y-1.5">
               <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
                 <User className="w-3.5 h-3.5 text-zinc-400" />
-                Nombre o Alias de Usuario
+                Tu Nombre o Alias en la Sala
               </label>
               <Input
                 type="text"
-                placeholder="Ej. Kevin, Alex, Marcus..."
+                placeholder="Ej. Kevin, Alex, Carlos..."
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 maxLength={24}
@@ -87,23 +137,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
               />
             </div>
 
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5 text-zinc-400" />
-                PIN o Clave de Sesión (Opcional)
-              </label>
-              <Input
-                type="password"
-                placeholder="PIN personal para la sesión"
-                value={accessPin}
-                onChange={(e) => setAccessPin(e.target.value)}
-                maxLength={16}
-                className="h-10 text-sm bg-zinc-950 border-zinc-800 focus-visible:ring-zinc-500"
-              />
-              <span className="block text-[11px] text-zinc-400">
-                Tu sesión se mantiene estrictamente en la memoria del navegador.
-              </span>
-            </div>
+            {hasInvite && !invitePasskey && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-zinc-400" />
+                  Clave de Cifrado de la Sala
+                </label>
+                <Input
+                  type="password"
+                  placeholder="Contraseña compartida por quien te invitó"
+                  value={manualPasskey}
+                  onChange={(e) => setManualPasskey(e.target.value)}
+                  className="h-10 text-sm bg-zinc-950 border-zinc-800 focus-visible:ring-zinc-500"
+                />
+              </div>
+            )}
 
             {errorMsg && (
               <div className="p-3 bg-rose-950/40 border border-rose-800/60 rounded-lg text-xs text-rose-300">
@@ -122,13 +170,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, isLoading }) 
                 <div className="w-4 h-4 border-2 border-zinc-900/30 border-t-zinc-900 rounded-full animate-spin" />
               ) : (
                 <>
-                  <span>Ingresar al Sistema</span>
+                  <span>{hasInvite ? `Unirse a la sala ${inviteRoomId}` : 'Ingresar al Sistema'}</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </>
               )}
             </Button>
             <p className="text-[11px] text-center text-zinc-400">
-              Arquitectura descentralizada. Ninguna credencial se envía a servidores de terceros.
+              Conexión directa peer-to-peer. Los datos desaparecen al salir o destruir la sala.
             </p>
           </CardFooter>
         </form>

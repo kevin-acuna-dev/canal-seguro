@@ -32,9 +32,9 @@ export class PeerChatController {
     username: string,
     isHost: boolean
   ): Promise<void> {
-    this.roomId = roomId.toLowerCase();
-    this.passkey = passkey;
-    this.username = username;
+    this.roomId = roomId.toLowerCase().trim();
+    this.passkey = passkey.trim();
+    this.username = username.trim();
     this.isHost = isHost;
 
     const { default: Peer } = await import('peerjs');
@@ -50,9 +50,13 @@ export class PeerChatController {
     };
 
     return new Promise((resolve, reject) => {
+      let isSettled = false;
+      let timeoutTimer: NodeJS.Timeout | null = null;
+
       try {
+        const targetHostId = `canalseguro-${this.roomId}`;
         const peerInstance = isHost
-          ? new Peer(`canalseguro-${this.roomId}`, peerOptions)
+          ? new Peer(targetHostId, peerOptions)
           : new Peer(peerOptions);
 
         this.peer = peerInstance;
@@ -65,13 +69,44 @@ export class PeerChatController {
             joinedAt: Date.now()
           });
 
-          this.callbacks.onConnected(id);
-          this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+          if (this.isHost) {
+            isSettled = true;
+            this.callbacks.onConnected(id);
+            this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+            resolve();
+          } else {
+            timeoutTimer = setTimeout(() => {
+              if (!isSettled) {
+                isSettled = true;
+                const msg = 'Tiempo de conexión agotado. Verifica que el anfitrión esté dentro de la sala.';
+                this.callbacks.onError(msg);
+                this.destroyRoomLocally();
+                reject(new Error(msg));
+              }
+            }, 15000);
 
-          if (!this.isHost) {
-            this.connectToHost(`canalseguro-${this.roomId}`, id);
+            this.connectToHost(
+              targetHostId,
+              id,
+              () => {
+                if (!isSettled) {
+                  isSettled = true;
+                  if (timeoutTimer) clearTimeout(timeoutTimer);
+                  this.callbacks.onConnected(id);
+                  resolve();
+                }
+              },
+              (errText) => {
+                if (!isSettled) {
+                  isSettled = true;
+                  if (timeoutTimer) clearTimeout(timeoutTimer);
+                  this.callbacks.onError(errText);
+                  this.destroyRoomLocally();
+                  reject(new Error(errText));
+                }
+              }
+            );
           }
-          resolve();
         });
 
         if (this.isHost) {
@@ -89,8 +124,16 @@ export class PeerChatController {
           } else if (err.message) {
             errorMsg = err.message;
           }
-          this.callbacks.onError(errorMsg);
-          reject(new Error(errorMsg));
+
+          if (!isSettled) {
+            isSettled = true;
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+            this.callbacks.onError(errorMsg);
+            this.destroyRoomLocally();
+            reject(new Error(errorMsg));
+          } else {
+            this.callbacks.onError(errorMsg);
+          }
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Fallo al inicializar PeerJS';
@@ -100,8 +143,16 @@ export class PeerChatController {
     });
   }
 
-  private connectToHost(hostPeerId: string, selfId: string): void {
-    if (!this.peer) return;
+  private connectToHost(
+    hostPeerId: string,
+    selfId: string,
+    onSuccess: () => void,
+    onFailure: (err: string) => void
+  ): void {
+    if (!this.peer) {
+      onFailure('El cliente peer no está inicializado.');
+      return;
+    }
 
     const conn = this.peer.connect(hostPeerId, {
       reliable: true
@@ -109,7 +160,7 @@ export class PeerChatController {
 
     this.hostConnection = conn;
 
-    conn.on('open', () => {
+    const handleOpen = () => {
       const joinPacket: PeerPacket = {
         type: 'USER_JOIN',
         senderId: selfId,
@@ -117,31 +168,46 @@ export class PeerChatController {
         timestamp: Date.now()
       };
       conn.send(joinPacket);
-    });
+      onSuccess();
+    };
+
+    if (conn.open) {
+      handleOpen();
+    } else {
+      conn.on('open', handleOpen);
+    }
 
     conn.on('data', (data) => {
       this.handlePacket(data as PeerPacket);
     });
 
     conn.on('close', () => {
-      this.callbacks.onError('Se perdió la conexión con la sala.');
+      this.callbacks.onError('Se perdió la conexión con el anfitrión de la sala.');
       this.destroyRoomLocally();
     });
 
     conn.on('error', () => {
-      this.callbacks.onError('Error en el enlace con el anfitrión de la sala.');
+      onFailure('No fue posible enlazar con la sala. Verifica el código.');
     });
   }
 
   private handleIncomingConnection(conn: DataConnection): void {
-    conn.on('open', () => {
+    const registerConn = () => {
       this.connections.set(conn.peer, conn);
-    });
+    };
+
+    if (conn.open) {
+      registerConn();
+    } else {
+      conn.on('open', registerConn);
+    }
 
     conn.on('data', (data) => {
       const packet = data as PeerPacket;
 
       if (packet.type === 'USER_JOIN') {
+        this.connections.set(conn.peer, conn);
+
         const newParticipant: Participant = {
           id: packet.senderId,
           name: packet.senderName || 'Participante',
@@ -149,7 +215,26 @@ export class PeerChatController {
           joinedAt: packet.timestamp
         };
         this.participants.set(packet.senderId, newParticipant);
-        this.broadcastParticipants();
+
+        const currentList = Array.from(this.participants.values());
+        this.callbacks.onParticipantsUpdated(currentList);
+
+        const syncPacket: PeerPacket = {
+          type: 'PEER_LIST',
+          senderId: this.peer?.id || '',
+          participants: currentList,
+          timestamp: Date.now()
+        };
+
+        if (conn.open) {
+          conn.send(syncPacket);
+        }
+
+        this.connections.forEach((c) => {
+          if (c.open && c.peer !== conn.peer) {
+            c.send(syncPacket);
+          }
+        });
 
         const joinMessage: ChatMessage = {
           id: `sys-${Date.now()}-${Math.random()}`,

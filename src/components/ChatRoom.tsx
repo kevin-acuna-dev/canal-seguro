@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   ChatMessage,
   Participant
@@ -18,7 +18,10 @@ import {
   Eraser,
   Lock,
   Radio,
-  Pencil
+  Pencil,
+  Share2,
+  Check,
+  Key
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -27,6 +30,7 @@ import { compressImage, VoiceRecorder } from '@/utils/media';
 
 interface ChatRoomProps {
   roomId: string;
+  passkey: string;
   username: string;
   isHost: boolean;
   participants: Participant[];
@@ -43,6 +47,7 @@ interface ChatRoomProps {
 
 export const ChatRoom: React.FC<ChatRoomProps> = ({
   roomId,
+  passkey,
   username,
   isHost,
   participants,
@@ -61,6 +66,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [showParticipantsModal, setShowParticipantsModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -208,10 +216,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     onAddToast('Grabación cancelada.', 'info');
   };
 
-  const handleCopyInviteLink = () => {
-    const url = `${window.location.origin}?room=${roomId}`;
-    navigator.clipboard.writeText(url);
-    onAddToast('Enlace de invitación copiado al portapapeles.', 'success');
+  const getFullInviteUrl = () => {
+    return `${window.location.origin}?room=${roomId}&key=${encodeURIComponent(passkey)}`;
+  };
+
+  const getCleanInviteUrl = () => {
+    return `${window.location.origin}?room=${roomId}`;
+  };
+
+  const handleCopyDirectLink = async () => {
+    const url = getFullInviteUrl();
+    await navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+    onAddToast('Enlace directo con clave copiado al portapapeles.', 'success');
+  };
+
+  const handleCopyCodeOnly = async () => {
+    await navigator.clipboard.writeText(roomId);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+    onAddToast('Código de sala copiado.', 'success');
   };
 
   const formatSeconds = (secs: number) => {
@@ -252,11 +277,13 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         <div className="flex items-center gap-1.5">
           <Button
             variant="outline"
-            size="icon"
-            onClick={handleCopyInviteLink}
-            title="Copiar enlace de sala"
+            size="sm"
+            onClick={() => setShowShareModal(true)}
+            className="gap-1.5"
+            title="Compartir enlace de sala"
           >
-            <Copy className="w-4 h-4" />
+            <Share2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Invitar amigos</span>
           </Button>
 
           <Button
@@ -309,7 +336,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         <div className="text-center my-2">
           <Badge variant="outline" className="text-[11px] text-zinc-400 py-1 px-3 border-zinc-800 gap-1.5">
             <Lock className="w-3 h-3 text-zinc-400" />
-            Cifrado AES-256-GCM directo en el navegador. Datos eliminados al salir.
+            Cifrado AES-256-GCM punto a punto. Tus amigos pueden unirse con el enlace de invitación.
           </Badge>
         </div>
 
@@ -492,6 +519,78 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           </form>
         )}
       </div>
+
+      {showShareModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md overflow-hidden shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2 text-zinc-100 text-sm font-semibold">
+                <Share2 className="w-4 h-4 text-emerald-400" />
+                <span>Invitar a tus amigos a la sala</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowShareModal(false)}
+                className="text-zinc-400 hover:text-zinc-200 p-1 rounded-md"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-400 font-medium">Enlace directo con clave (1 clic para entrar):</span>
+                  <Badge variant="success" className="text-[9px]">Recomendado</Badge>
+                </div>
+                <div className="p-2 bg-zinc-900 rounded-lg font-mono text-[11px] text-zinc-300 break-all select-all border border-zinc-800">
+                  {getFullInviteUrl()}
+                </div>
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={handleCopyDirectLink}
+                  className="w-full gap-1.5"
+                >
+                  {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedLink ? 'Copiado al portapapeles' : 'Copiar enlace completo con clave'}</span>
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <div className="p-2.5 bg-zinc-950 border border-zinc-800 rounded-lg">
+                  <span className="text-[10px] text-zinc-400 block mb-1">Código de sala:</span>
+                  <span className="font-mono font-bold text-zinc-200 text-xs block">{roomId}</span>
+                </div>
+                <div className="p-2.5 bg-zinc-950 border border-zinc-800 rounded-lg">
+                  <span className="text-[10px] text-zinc-400 block mb-1">Clave de cifrado:</span>
+                  <span className="font-mono font-bold text-zinc-200 text-xs block">{passkey}</span>
+                </div>
+              </div>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCopyCodeOnly}
+                className="w-full gap-1.5"
+              >
+                {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>Copiar solo código de sala</span>
+              </Button>
+            </div>
+
+            <div className="px-5 py-3 bg-zinc-950 border-t border-zinc-800 text-right">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowShareModal(false)}
+              >
+                Cerrar
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showParticipantsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
