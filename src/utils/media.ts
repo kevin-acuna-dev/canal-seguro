@@ -53,7 +53,17 @@ export class VoiceRecorder {
   async start(): Promise<void> {
     this.audioChunks = [];
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    this.mediaRecorder = new MediaRecorder(this.stream);
+
+    let options: MediaRecorderOptions | undefined;
+    if (typeof MediaRecorder.isTypeSupported === 'function') {
+      if (MediaRecorder.isTypeSupported('audio/webm')) {
+        options = { mimeType: 'audio/webm' };
+      } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
+        options = { mimeType: 'audio/mp4' };
+      }
+    }
+
+    this.mediaRecorder = options ? new MediaRecorder(this.stream, options) : new MediaRecorder(this.stream);
 
     this.mediaRecorder.ondataavailable = (event) => {
       if (event.data.size > 0) {
@@ -71,8 +81,10 @@ export class VoiceRecorder {
         return;
       }
 
+      const mimeType = this.mediaRecorder.mimeType || 'audio/webm';
+
       this.mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+        const audioBlob = new Blob(this.audioChunks, { type: mimeType });
         const reader = new FileReader();
         reader.onloadend = () => {
           if (this.stream) {

@@ -17,7 +17,7 @@ export interface ChatMessage {
 }
 
 export interface PeerPacket {
-  type: 'MESSAGE' | 'USER_JOIN' | 'USER_LEAVE' | 'PEER_LIST' | 'ROOM_DESTROY' | 'TYPING';
+  type: 'MESSAGE' | 'USER_JOIN' | 'USER_PRESENT' | 'USER_LEAVE' | 'PEER_LIST' | 'ROOM_DESTROY' | 'TYPING';
   senderId: string;
   senderName?: string;
   payload?: EncryptedPayload | string;

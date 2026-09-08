@@ -21,6 +21,7 @@ export class PeerChatController {
   private callbacks: ChatCallbacks;
   private participants: Map<string, Participant> = new Map();
   private topic: string = '';
+  private processedMessageIds: Set<string> = new Set();
 
   constructor(callbacks: ChatCallbacks) {
     this.callbacks = callbacks;
@@ -37,48 +38,52 @@ export class PeerChatController {
     this.username = username.trim();
     this.isHost = isHost;
     this.clientId = `cs-${Math.random().toString(36).substring(2, 10)}`;
-    this.topic = `canalseguro/v3/rooms/${this.roomId}`;
+    this.topic = `canalseguro/v4/rooms/${this.roomId}`;
+    this.processedMessageIds.clear();
 
     return new Promise((resolve, reject) => {
-      let isSettled = false;
+      let isInitialConnect = true;
       const brokers = [
         'wss://broker.emqx.io:8084/mqtt',
         'wss://broker.hivemq.com:8884/mqtt'
       ];
-      let brokerIndex = 0;
+      let currentBrokerIndex = 0;
 
-      const connectBroker = (url: string) => {
+      const connectToBroker = (url: string) => {
         try {
           const clientInstance = mqtt.connect(url, {
             clientId: this.clientId,
             clean: true,
-            connectTimeout: 5000,
-            reconnectPeriod: 2500
+            keepalive: 20,
+            connectTimeout: 7000,
+            reconnectPeriod: 4000
           });
 
           this.client = clientInstance;
 
           clientInstance.on('connect', () => {
-            clientInstance.subscribe(this.topic, { qos: 1 }, (err) => {
+            clientInstance.subscribe(this.topic, { qos: 0 }, (err) => {
               if (err) {
-                if (!isSettled) {
-                  isSettled = true;
-                  const errText = 'No se pudo suscribir al canal seguro.';
-                  this.callbacks.onError(errText);
-                  reject(new Error(errText));
+                if (isInitialConnect) {
+                  this.callbacks.onError('Error al suscribir al canal seguro.');
+                  reject(err);
                 }
                 return;
               }
 
-              this.participants.set(this.clientId, {
-                id: this.clientId,
-                name: this.username,
-                isHost: this.isHost,
-                joinedAt: Date.now()
-              });
+              if (isInitialConnect) {
+                isInitialConnect = false;
+                this.participants.set(this.clientId, {
+                  id: this.clientId,
+                  name: this.username,
+                  isHost: this.isHost,
+                  joinedAt: Date.now()
+                });
 
-              this.callbacks.onConnected(this.clientId);
-              this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+                this.callbacks.onConnected(this.clientId);
+                this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+                resolve();
+              }
 
               this.publishPacket({
                 type: 'USER_JOIN',
@@ -86,11 +91,6 @@ export class PeerChatController {
                 senderName: this.username,
                 timestamp: Date.now()
               });
-
-              if (!isSettled) {
-                isSettled = true;
-                resolve();
-              }
             });
           });
 
@@ -103,37 +103,35 @@ export class PeerChatController {
           });
 
           clientInstance.on('error', (err) => {
-            if (!isSettled) {
-              brokerIndex++;
-              if (brokerIndex < brokers.length) {
+            if (isInitialConnect) {
+              currentBrokerIndex++;
+              if (currentBrokerIndex < brokers.length) {
                 clientInstance.end(true);
-                connectBroker(brokers[brokerIndex]);
+                connectToBroker(brokers[currentBrokerIndex]);
                 return;
               }
-              isSettled = true;
-              const msg = err.message || 'Error de transporte en tiempo real';
+              const msg = err.message || 'Error de conexión en red móvil';
               this.callbacks.onError(msg);
               reject(new Error(msg));
             }
           });
         } catch (e) {
-          if (!isSettled) {
-            isSettled = true;
-            const msg = e instanceof Error ? e.message : 'Fallo en cliente de red';
+          if (isInitialConnect) {
+            const msg = e instanceof Error ? e.message : 'Fallo en transporte de red';
             this.callbacks.onError(msg);
             reject(e);
           }
         }
       };
 
-      connectBroker(brokers[0]);
+      connectToBroker(brokers[0]);
     });
   }
 
   private publishPacket(packet: PeerPacket): void {
     if (!this.client || !this.client.connected) return;
     try {
-      this.client.publish(this.topic, JSON.stringify(packet), { qos: 1 });
+      this.client.publish(this.topic, JSON.stringify(packet), { qos: 0 });
     } catch {}
   }
 
@@ -151,11 +149,10 @@ export class PeerChatController {
       this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
 
       this.publishPacket({
-        type: 'USER_LEAVE',
+        type: 'USER_PRESENT',
         senderId: this.clientId,
         senderName: this.username,
-        timestamp: Date.now(),
-        participants: Array.from(this.participants.values())
+        timestamp: Date.now()
       });
 
       const joinMsg: ChatMessage = {
@@ -164,23 +161,25 @@ export class PeerChatController {
         senderName: 'Sistema',
         timestamp: Date.now(),
         type: 'system',
-        content: `${newParticipant.name} se ha conectado al canal.`
+        content: `${newParticipant.name} se ha conectado.`
       };
       this.callbacks.onMessageReceived(joinMsg);
       return;
     }
 
-    if (packet.type === 'USER_LEAVE') {
-      if (packet.participants && packet.participants.length > 0) {
-        packet.participants.forEach((p) => {
-          if (!this.participants.has(p.id)) {
-            this.participants.set(p.id, p);
-          }
-        });
-        this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-        return;
-      }
+    if (packet.type === 'USER_PRESENT') {
+      const presentParticipant: Participant = {
+        id: packet.senderId,
+        name: packet.senderName || 'Participante',
+        isHost: false,
+        joinedAt: packet.timestamp
+      };
+      this.participants.set(packet.senderId, presentParticipant);
+      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+      return;
+    }
 
+    if (packet.type === 'USER_LEAVE') {
       const p = this.participants.get(packet.senderId);
       this.participants.delete(packet.senderId);
       this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
@@ -218,10 +217,16 @@ export class PeerChatController {
       try {
         const decryptedJson = await decryptData(packet.payload as EncryptedPayload, this.passkey);
         const parsedMessage = JSON.parse(decryptedJson) as ChatMessage;
+
+        if (this.processedMessageIds.has(parsedMessage.id)) {
+          return;
+        }
+        this.processedMessageIds.add(parsedMessage.id);
+
         parsedMessage.isSelf = false;
         this.callbacks.onMessageReceived(parsedMessage);
       } catch {
-        this.callbacks.onError('Mensaje recibido con clave de cifrado incompatible.');
+        this.callbacks.onError('Mensaje recibido con clave incompatible.');
       }
     }
   }
@@ -242,8 +247,11 @@ export class PeerChatController {
     mediaName?: string,
     mediaSize?: number
   ): Promise<ChatMessage> {
+    const messageId = `msg-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    this.processedMessageIds.add(messageId);
+
     const message: ChatMessage = {
-      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      id: messageId,
       senderId: this.clientId,
       senderName: this.username,
       timestamp: Date.now(),
@@ -299,5 +307,6 @@ export class PeerChatController {
     }
 
     this.participants.clear();
+    this.processedMessageIds.clear();
   }
 }

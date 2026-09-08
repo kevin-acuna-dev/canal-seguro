@@ -251,7 +251,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-screen max-h-screen bg-zinc-950 text-zinc-100 antialiased overflow-hidden">
+    <div className="flex flex-col h-[100dvh] max-h-[100dvh] bg-zinc-950 text-zinc-100 antialiased overflow-hidden overscroll-none">
       <header className="h-14 border-b border-zinc-800 bg-zinc-900/90 px-4 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-center">
@@ -499,7 +499,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 onPaste={handlePaste}
                 rows={1}
                 placeholder="Escribe un mensaje cifrado o pega una imagen..."
-                className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-600 resize-none max-h-28 overflow-y-auto leading-normal transition-colors"
+                className="w-full px-3.5 py-2.5 bg-zinc-950 border border-zinc-800 rounded-xl text-base sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-600 resize-none max-h-28 overflow-y-auto leading-normal transition-colors touch-manipulation"
               />
             </div>
 
