@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Canal Seguro | Mensajería Efímera Cifrada E2EE',
+  title: 'Canal Seguro | Mensajería Efímera',
   description: 'Canal de comunicación privada y efímera cifrada punto a punto con eliminación total de datos.',
 };
 

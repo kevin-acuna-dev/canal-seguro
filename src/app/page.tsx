@@ -29,12 +29,16 @@ export default function Home() {
   const typingTimeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    setToasts((prev) => [...prev, { id, message, type }]);
-
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4500);
+    setToasts((prev) => {
+      if (prev.some((t) => t.message === message)) {
+        return prev;
+      }
+      const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      setTimeout(() => {
+        setToasts((current) => current.filter((t) => t.id !== id));
+      }, 4000);
+      return [...prev.slice(-2), { id, message, type }];
+    });
   }, []);
 
   const handleDismissToast = useCallback((id: string) => {
