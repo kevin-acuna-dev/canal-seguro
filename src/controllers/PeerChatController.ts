@@ -11,7 +11,6 @@ export interface ChatCallbacks {
 }
 
 export class PeerChatController {
-  private eventSource: EventSource | null = null;
   private clientId: string = '';
   private roomId: string = '';
   private passkey: string = '';
@@ -19,9 +18,11 @@ export class PeerChatController {
   private isHost: boolean = false;
   private callbacks: ChatCallbacks;
   private participants: Map<string, Participant> = new Map();
-  private topicUrl: string = '';
+  private isPollingActive: boolean = false;
+  private lastPollTimestamp: number = 0;
   private processedMessageIds: Set<string> = new Set();
-  private announcedParticipants: Set<string> = new Set();
+  private announcedJoins: Set<string> = new Set();
+  private abortController: AbortController | null = null;
 
   constructor(callbacks: ChatCallbacks) {
     this.callbacks = callbacks;
@@ -37,204 +38,177 @@ export class PeerChatController {
     this.passkey = passkey.trim();
     this.username = username.trim();
     this.isHost = isHost;
-    this.clientId = `cs-${Math.random().toString(36).substring(2, 10)}`;
-    this.topicUrl = `https://ntfy.sh/cs_v5_${this.roomId}`;
+    this.clientId = `usr-${Math.random().toString(36).substring(2, 10)}`;
     this.processedMessageIds.clear();
-    this.announcedParticipants.clear();
+    this.announcedJoins.clear();
+    this.lastPollTimestamp = Date.now() - 2000;
 
-    return new Promise((resolve, reject) => {
-      let isSettled = false;
+    try {
+      const response = await fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: isHost ? 'create' : 'join',
+          roomId: this.roomId,
+          clientId: this.clientId,
+          username: this.username,
+          isHost: this.isHost
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = data.error || 'Error al conectar con la sala';
+        this.callbacks.onError(errorMsg);
+        throw new Error(errorMsg);
+      }
+
+      this.participants.clear();
+      if (Array.isArray(data.participants)) {
+        data.participants.forEach((p: Participant) => {
+          this.participants.set(p.id, p);
+          this.announcedJoins.add(p.id);
+        });
+      }
+
+      this.callbacks.onConnected(this.clientId);
+      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+
+      this.isPollingActive = true;
+      this.startPollLoop();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Fallo al iniciar conexión con el backend propio';
+      this.callbacks.onError(msg);
+      throw err;
+    }
+  }
+
+  private async startPollLoop(): Promise<void> {
+    while (this.isPollingActive) {
+      this.abortController = new AbortController();
 
       try {
-        const sse = new EventSource(`${this.topicUrl}/sse`);
-        this.eventSource = sse;
-
-        const completeConnection = () => {
-          if (!isSettled) {
-            isSettled = true;
-            this.participants.set(this.clientId, {
-              id: this.clientId,
-              name: this.username,
-              isHost: this.isHost,
-              joinedAt: Date.now()
-            });
-
-            this.callbacks.onConnected(this.clientId);
-            this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-
-            this.publishPacket({
-              type: 'USER_JOIN',
-              senderId: this.clientId,
-              senderName: this.username,
-              timestamp: Date.now()
-            });
-
-            resolve();
-          }
-        };
-
-        sse.addEventListener('open', () => {
-          completeConnection();
+        const url = `/api/sync?roomId=${encodeURIComponent(this.roomId)}&clientId=${encodeURIComponent(this.clientId)}&since=${this.lastPollTimestamp}`;
+        const res = await fetch(url, {
+          signal: this.abortController.signal,
+          cache: 'no-store'
         });
 
-        sse.addEventListener('message', (event) => {
-          try {
-            const raw = JSON.parse(event.data);
-            if (raw.event === 'open') {
-              completeConnection();
+        if (!this.isPollingActive) break;
+
+        if (!res.ok) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+
+        const data = await res.json();
+
+        if (data.destroyed) {
+          this.isPollingActive = false;
+          this.callbacks.onRoomDestroyed();
+          this.destroyRoomLocally();
+          break;
+        }
+
+        if (Array.isArray(data.participants)) {
+          this.participants.clear();
+          data.participants.forEach((p: Participant) => {
+            this.participants.set(p.id, p);
+          });
+          this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+        }
+
+        if (Array.isArray(data.typing)) {
+          const remoteTyping = data.typing.filter((name: string) => name !== this.username);
+          if (remoteTyping.length > 0) {
+            this.callbacks.onTypingStateChanged('remote', remoteTyping.join(', '), true);
+          } else {
+            this.callbacks.onTypingStateChanged('remote', '', false);
+          }
+        }
+
+        if (Array.isArray(data.packets) && data.packets.length > 0) {
+          for (const pkt of data.packets) {
+            if (pkt.timestamp > this.lastPollTimestamp) {
+              this.lastPollTimestamp = pkt.timestamp;
+            }
+
+            if (pkt.senderId === this.clientId) continue;
+
+            if (pkt.type === 'USER_JOIN' && !this.announcedJoins.has(pkt.senderId)) {
+              this.announcedJoins.add(pkt.senderId);
+              const joinMsg: ChatMessage = {
+                id: pkt.id || `sys-${Date.now()}-${Math.random()}`,
+                senderId: 'system',
+                senderName: 'Sistema',
+                timestamp: pkt.timestamp,
+                type: 'system',
+                content: `${pkt.senderName || 'Participante'} se ha conectado al canal.`
+              };
+              this.callbacks.onMessageReceived(joinMsg);
+            }
+
+            if (pkt.type === 'USER_LEAVE') {
+              this.announcedJoins.delete(pkt.senderId);
+              const leaveMsg: ChatMessage = {
+                id: pkt.id || `sys-${Date.now()}-${Math.random()}`,
+                senderId: 'system',
+                senderName: 'Sistema',
+                timestamp: pkt.timestamp,
+                type: 'system',
+                content: `${pkt.senderName || 'Participante'} ha salido del canal.`
+              };
+              this.callbacks.onMessageReceived(leaveMsg);
+            }
+
+            if (pkt.type === 'ROOM_DESTROY') {
+              this.isPollingActive = false;
+              this.callbacks.onRoomDestroyed();
+              this.destroyRoomLocally();
               return;
             }
-            if (raw.event === 'message' && raw.message) {
-              const packet = JSON.parse(raw.message) as PeerPacket;
-              this.handlePacket(packet);
+
+            if (pkt.type === 'MESSAGE' && pkt.payload) {
+              try {
+                const decrypted = await decryptData(pkt.payload as EncryptedPayload, this.passkey);
+                const parsedMsg = JSON.parse(decrypted) as ChatMessage;
+
+                if (!this.processedMessageIds.has(parsedMsg.id)) {
+                  this.processedMessageIds.add(parsedMsg.id);
+                  parsedMsg.isSelf = false;
+                  this.callbacks.onMessageReceived(parsedMsg);
+                }
+              } catch {
+                this.callbacks.onError('Mensaje recibido con clave de cifrado incompatible.');
+              }
             }
-          } catch {}
-        });
-
-        sse.addEventListener('error', () => {
-          if (!isSettled) {
-            isSettled = true;
-            const err = 'Error al establecer el canal seguro.';
-            this.callbacks.onError(err);
-            reject(new Error(err));
           }
-        });
-
-        setTimeout(() => {
-          if (!isSettled) {
-            completeConnection();
-          }
-        }, 1500);
-      } catch (e) {
-        if (!isSettled) {
-          isSettled = true;
-          const msg = e instanceof Error ? e.message : 'Fallo en transporte';
-          this.callbacks.onError(msg);
-          reject(e);
         }
+      } catch (e: unknown) {
+        if (!this.isPollingActive) break;
+        if (e instanceof Error && e.name === 'AbortError') {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1200));
       }
-    });
+    }
   }
 
-  private async publishPacket(packet: PeerPacket): Promise<void> {
+  async sendTypingStatus(isTyping: boolean): Promise<void> {
     try {
-      await fetch(this.topicUrl, {
+      await fetch('/api/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify(packet)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'typing',
+          roomId: this.roomId,
+          clientId: this.clientId,
+          username: this.username,
+          isTyping
+        })
       });
     } catch {}
-  }
-
-  private async handlePacket(packet: PeerPacket): Promise<void> {
-    if (!packet || packet.senderId === this.clientId) return;
-
-    if (packet.type === 'USER_JOIN') {
-      const isNew = !this.participants.has(packet.senderId);
-      const newParticipant: Participant = {
-        id: packet.senderId,
-        name: packet.senderName || 'Participante',
-        isHost: false,
-        joinedAt: packet.timestamp
-      };
-      this.participants.set(packet.senderId, newParticipant);
-      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-
-      this.publishPacket({
-        type: 'USER_PRESENT',
-        senderId: this.clientId,
-        senderName: this.username,
-        timestamp: Date.now()
-      });
-
-      if (isNew && !this.announcedParticipants.has(packet.senderId)) {
-        this.announcedParticipants.add(packet.senderId);
-        const joinMsg: ChatMessage = {
-          id: `sys-${Date.now()}-${Math.random()}`,
-          senderId: 'system',
-          senderName: 'Sistema',
-          timestamp: Date.now(),
-          type: 'system',
-          content: `${newParticipant.name} se ha conectado.`
-        };
-        this.callbacks.onMessageReceived(joinMsg);
-      }
-      return;
-    }
-
-    if (packet.type === 'USER_PRESENT') {
-      const presentParticipant: Participant = {
-        id: packet.senderId,
-        name: packet.senderName || 'Participante',
-        isHost: false,
-        joinedAt: packet.timestamp
-      };
-      this.participants.set(packet.senderId, presentParticipant);
-      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-      return;
-    }
-
-    if (packet.type === 'USER_LEAVE') {
-      const p = this.participants.get(packet.senderId);
-      this.participants.delete(packet.senderId);
-      this.announcedParticipants.delete(packet.senderId);
-      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-
-      if (p) {
-        const leaveMsg: ChatMessage = {
-          id: `sys-${Date.now()}-${Math.random()}`,
-          senderId: 'system',
-          senderName: 'Sistema',
-          timestamp: Date.now(),
-          type: 'system',
-          content: `${p.name} se ha desconectado.`
-        };
-        this.callbacks.onMessageReceived(leaveMsg);
-      }
-      return;
-    }
-
-    if (packet.type === 'ROOM_DESTROY') {
-      this.callbacks.onRoomDestroyed();
-      this.destroyRoomLocally();
-      return;
-    }
-
-    if (packet.type === 'TYPING') {
-      this.callbacks.onTypingStateChanged(
-        packet.senderId,
-        packet.senderName || 'Participante',
-        Boolean(packet.isTyping)
-      );
-      return;
-    }
-
-    if (packet.type === 'MESSAGE' && packet.payload) {
-      try {
-        const decryptedJson = await decryptData(packet.payload as EncryptedPayload, this.passkey);
-        const parsedMessage = JSON.parse(decryptedJson) as ChatMessage;
-
-        if (this.processedMessageIds.has(parsedMessage.id)) {
-          return;
-        }
-        this.processedMessageIds.add(parsedMessage.id);
-
-        parsedMessage.isSelf = false;
-        this.callbacks.onMessageReceived(parsedMessage);
-      } catch {
-        this.callbacks.onError('Mensaje recibido con clave incompatible.');
-      }
-    }
-  }
-
-  sendTypingStatus(isTyping: boolean): void {
-    this.publishPacket({
-      type: 'TYPING',
-      senderId: this.clientId,
-      senderName: this.username,
-      isTyping,
-      timestamp: Date.now()
-    });
   }
 
   async sendMessage(
@@ -260,41 +234,69 @@ export class PeerChatController {
 
     const encrypted = await encryptData(JSON.stringify(message), this.passkey);
 
-    await this.publishPacket({
-      type: 'MESSAGE',
-      senderId: this.clientId,
-      senderName: this.username,
-      payload: encrypted,
-      timestamp: Date.now()
+    await fetch('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'send',
+        roomId: this.roomId,
+        clientId: this.clientId,
+        username: this.username,
+        packet: {
+          id: messageId,
+          type: 'MESSAGE',
+          senderId: this.clientId,
+          senderName: this.username,
+          payload: encrypted,
+          timestamp: Date.now()
+        }
+      })
     });
 
     return message;
   }
 
-  destroyRoom(): void {
-    this.publishPacket({
-      type: 'ROOM_DESTROY',
-      senderId: this.clientId,
-      timestamp: Date.now()
-    });
+  async destroyRoom(): Promise<void> {
+    try {
+      await fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'destroy',
+          roomId: this.roomId,
+          clientId: this.clientId,
+          username: this.username
+        })
+      });
+    } catch {}
+
     this.destroyRoomLocally();
   }
 
   destroyRoomLocally(): void {
-    if (this.eventSource) {
-      this.publishPacket({
-        type: 'USER_LEAVE',
-        senderId: this.clientId,
-        senderName: this.username,
-        timestamp: Date.now()
-      });
+    this.isPollingActive = false;
 
-      this.eventSource.close();
-      this.eventSource = null;
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
     }
+
+    try {
+      fetch('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'leave',
+          roomId: this.roomId,
+          clientId: this.clientId,
+          username: this.username
+        }),
+        keepalive: true
+      });
+    } catch {}
 
     this.participants.clear();
     this.processedMessageIds.clear();
-    this.announcedParticipants.clear();
+    this.announcedJoins.clear();
   }
 }
