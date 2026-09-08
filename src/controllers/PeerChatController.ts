@@ -1,4 +1,4 @@
-import type { DataConnection, Peer as PeerType } from 'peerjs';
+import mqtt, { MqttClient } from 'mqtt';
 import { ChatMessage, EncryptedPayload, Participant, PeerPacket } from '@/types/chat';
 import { encryptData, decryptData } from '@/utils/crypto';
 
@@ -12,15 +12,15 @@ export interface ChatCallbacks {
 }
 
 export class PeerChatController {
-  private peer: PeerType | null = null;
-  private connections: Map<string, DataConnection> = new Map();
-  private hostConnection: DataConnection | null = null;
+  private client: MqttClient | null = null;
+  private clientId: string = '';
   private roomId: string = '';
   private passkey: string = '';
   private username: string = '';
   private isHost: boolean = false;
   private callbacks: ChatCallbacks;
   private participants: Map<string, Participant> = new Map();
+  private topic: string = '';
 
   constructor(callbacks: ChatCallbacks) {
     this.callbacks = callbacks;
@@ -36,278 +36,157 @@ export class PeerChatController {
     this.passkey = passkey.trim();
     this.username = username.trim();
     this.isHost = isHost;
-
-    const { default: Peer } = await import('peerjs');
-
-    const peerOptions = {
-      secure: typeof window !== 'undefined' && window.location.protocol === 'https:',
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
-          { urls: 'stun:stun3.l.google.com:19302' },
-          { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:stun.cloudflare.com:3478' },
-          { urls: 'stun:stun.services.mozilla.com:3478' },
-          {
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelay',
-            credential: 'openrelay'
-          },
-          {
-            urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelay',
-            credential: 'openrelay'
-          },
-          {
-            urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-            username: 'openrelay',
-            credential: 'openrelay'
-          }
-        ],
-        iceCandidatePoolSize: 10
-      }
-    };
+    this.clientId = `cs-${Math.random().toString(36).substring(2, 10)}`;
+    this.topic = `canalseguro/v3/rooms/${this.roomId}`;
 
     return new Promise((resolve, reject) => {
       let isSettled = false;
-      let timeoutTimer: NodeJS.Timeout | null = null;
+      const brokers = [
+        'wss://broker.emqx.io:8084/mqtt',
+        'wss://broker.hivemq.com:8884/mqtt'
+      ];
+      let brokerIndex = 0;
 
-      try {
-        const targetHostId = `canalseguro-${this.roomId}`;
-        const peerInstance = isHost
-          ? new Peer(targetHostId, peerOptions)
-          : new Peer(peerOptions);
-
-        this.peer = peerInstance;
-
-        peerInstance.on('open', (id) => {
-          this.participants.set(id, {
-            id,
-            name: this.username,
-            isHost: this.isHost,
-            joinedAt: Date.now()
+      const connectBroker = (url: string) => {
+        try {
+          const clientInstance = mqtt.connect(url, {
+            clientId: this.clientId,
+            clean: true,
+            connectTimeout: 5000,
+            reconnectPeriod: 2500
           });
 
-          if (this.isHost) {
-            isSettled = true;
-            this.callbacks.onConnected(id);
-            this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-            resolve();
-          } else {
-            timeoutTimer = setTimeout(() => {
-              if (!isSettled) {
-                isSettled = true;
-                const msg = 'Tiempo de conexión agotado. Verifica que el anfitrión esté dentro de la sala.';
-                this.callbacks.onError(msg);
-                this.destroyRoomLocally();
-                reject(new Error(msg));
-              }
-            }, 15000);
+          this.client = clientInstance;
 
-            this.connectToHost(
-              targetHostId,
-              id,
-              () => {
+          clientInstance.on('connect', () => {
+            clientInstance.subscribe(this.topic, { qos: 1 }, (err) => {
+              if (err) {
                 if (!isSettled) {
                   isSettled = true;
-                  if (timeoutTimer) clearTimeout(timeoutTimer);
-                  this.callbacks.onConnected(id);
-                  resolve();
-                }
-              },
-              (errText) => {
-                if (!isSettled) {
-                  isSettled = true;
-                  if (timeoutTimer) clearTimeout(timeoutTimer);
+                  const errText = 'No se pudo suscribir al canal seguro.';
                   this.callbacks.onError(errText);
-                  this.destroyRoomLocally();
                   reject(new Error(errText));
                 }
+                return;
               }
-            );
-          }
-        });
 
-        if (this.isHost) {
-          peerInstance.on('connection', (conn) => {
-            this.handleIncomingConnection(conn);
+              this.participants.set(this.clientId, {
+                id: this.clientId,
+                name: this.username,
+                isHost: this.isHost,
+                joinedAt: Date.now()
+              });
+
+              this.callbacks.onConnected(this.clientId);
+              this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+
+              this.publishPacket({
+                type: 'USER_JOIN',
+                senderId: this.clientId,
+                senderName: this.username,
+                timestamp: Date.now()
+              });
+
+              if (!isSettled) {
+                isSettled = true;
+                resolve();
+              }
+            });
           });
-        }
 
-        peerInstance.on('error', (err) => {
-          let errorMsg = 'Error en la conexión segura';
-          if (err.type === 'unavailable-id') {
-            errorMsg = 'El código de sala ya está en uso por otro anfitrión.';
-          } else if (err.type === 'peer-unavailable') {
-            errorMsg = 'La sala no existe o el anfitrión no está conectado.';
-          } else if (err.message) {
-            errorMsg = err.message;
-          }
+          clientInstance.on('message', (_topic, messageBuffer) => {
+            try {
+              const rawString = messageBuffer.toString();
+              const packet = JSON.parse(rawString) as PeerPacket;
+              this.handlePacket(packet);
+            } catch {}
+          });
 
+          clientInstance.on('error', (err) => {
+            if (!isSettled) {
+              brokerIndex++;
+              if (brokerIndex < brokers.length) {
+                clientInstance.end(true);
+                connectBroker(brokers[brokerIndex]);
+                return;
+              }
+              isSettled = true;
+              const msg = err.message || 'Error de transporte en tiempo real';
+              this.callbacks.onError(msg);
+              reject(new Error(msg));
+            }
+          });
+        } catch (e) {
           if (!isSettled) {
             isSettled = true;
-            if (timeoutTimer) clearTimeout(timeoutTimer);
-            this.callbacks.onError(errorMsg);
-            this.destroyRoomLocally();
-            reject(new Error(errorMsg));
-          } else {
-            this.callbacks.onError(errorMsg);
+            const msg = e instanceof Error ? e.message : 'Fallo en cliente de red';
+            this.callbacks.onError(msg);
+            reject(e);
           }
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Fallo al inicializar PeerJS';
-        this.callbacks.onError(msg);
-        reject(err);
-      }
+        }
+      };
+
+      connectBroker(brokers[0]);
     });
   }
 
-  private connectToHost(
-    hostPeerId: string,
-    selfId: string,
-    onSuccess: () => void,
-    onFailure: (err: string) => void
-  ): void {
-    if (!this.peer) {
-      onFailure('El cliente peer no está inicializado.');
+  private publishPacket(packet: PeerPacket): void {
+    if (!this.client || !this.client.connected) return;
+    try {
+      this.client.publish(this.topic, JSON.stringify(packet), { qos: 1 });
+    } catch {}
+  }
+
+  private async handlePacket(packet: PeerPacket): Promise<void> {
+    if (packet.senderId === this.clientId) return;
+
+    if (packet.type === 'USER_JOIN') {
+      const newParticipant: Participant = {
+        id: packet.senderId,
+        name: packet.senderName || 'Participante',
+        isHost: false,
+        joinedAt: packet.timestamp
+      };
+      this.participants.set(packet.senderId, newParticipant);
+      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
+
+      this.publishPacket({
+        type: 'USER_LEAVE',
+        senderId: this.clientId,
+        senderName: this.username,
+        timestamp: Date.now(),
+        participants: Array.from(this.participants.values())
+      });
+
+      const joinMsg: ChatMessage = {
+        id: `sys-${Date.now()}-${Math.random()}`,
+        senderId: 'system',
+        senderName: 'Sistema',
+        timestamp: Date.now(),
+        type: 'system',
+        content: `${newParticipant.name} se ha conectado al canal.`
+      };
+      this.callbacks.onMessageReceived(joinMsg);
       return;
     }
 
-    const conn = this.peer.connect(hostPeerId, {
-      reliable: true
-    });
-
-    this.hostConnection = conn;
-
-    const handleOpen = () => {
-      const joinPacket: PeerPacket = {
-        type: 'USER_JOIN',
-        senderId: selfId,
-        senderName: this.username,
-        timestamp: Date.now()
-      };
-      conn.send(joinPacket);
-      onSuccess();
-    };
-
-    if (conn.open) {
-      handleOpen();
-    } else {
-      conn.on('open', handleOpen);
-    }
-
-    conn.on('data', (data) => {
-      this.handlePacket(data as PeerPacket);
-    });
-
-    conn.on('close', () => {
-      this.callbacks.onError('Se perdió la conexión con el anfitrión de la sala.');
-      this.destroyRoomLocally();
-    });
-
-    conn.on('error', () => {
-      onFailure('No fue posible enlazar con la sala. Verifica el código.');
-    });
-  }
-
-  private handleIncomingConnection(conn: DataConnection): void {
-    const registerConn = () => {
-      this.connections.set(conn.peer, conn);
-    };
-
-    if (conn.open) {
-      registerConn();
-    } else {
-      conn.on('open', registerConn);
-    }
-
-    conn.on('data', (data) => {
-      const packet = data as PeerPacket;
-
-      if (packet.type === 'USER_JOIN') {
-        this.connections.set(conn.peer, conn);
-
-        const newParticipant: Participant = {
-          id: packet.senderId,
-          name: packet.senderName || 'Participante',
-          isHost: false,
-          joinedAt: packet.timestamp
-        };
-        this.participants.set(packet.senderId, newParticipant);
-
-        const currentList = Array.from(this.participants.values());
-        this.callbacks.onParticipantsUpdated(currentList);
-
-        const syncPacket: PeerPacket = {
-          type: 'PEER_LIST',
-          senderId: this.peer?.id || '',
-          participants: currentList,
-          timestamp: Date.now()
-        };
-
-        if (conn.open) {
-          conn.send(syncPacket);
-        }
-
-        this.connections.forEach((c) => {
-          if (c.open && c.peer !== conn.peer) {
-            c.send(syncPacket);
+    if (packet.type === 'USER_LEAVE') {
+      if (packet.participants && packet.participants.length > 0) {
+        packet.participants.forEach((p) => {
+          if (!this.participants.has(p.id)) {
+            this.participants.set(p.id, p);
           }
         });
-
-        const joinMessage: ChatMessage = {
-          id: `sys-${Date.now()}-${Math.random()}`,
-          senderId: 'system',
-          senderName: 'Sistema',
-          timestamp: Date.now(),
-          type: 'system',
-          content: `${newParticipant.name} se ha unido al canal.`
-        };
-        this.callbacks.onMessageReceived(joinMessage);
+        this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
         return;
       }
 
-      if (packet.type === 'USER_LEAVE') {
-        const p = this.participants.get(packet.senderId);
-        this.participants.delete(packet.senderId);
-        this.connections.delete(packet.senderId);
-        this.broadcastParticipants();
-
-        if (p) {
-          const leaveMessage: ChatMessage = {
-            id: `sys-${Date.now()}-${Math.random()}`,
-            senderId: 'system',
-            senderName: 'Sistema',
-            timestamp: Date.now(),
-            type: 'system',
-            content: `${p.name} ha salido del canal.`
-          };
-          this.callbacks.onMessageReceived(leaveMessage);
-        }
-        return;
-      }
-
-      this.handlePacket(packet);
-
-      if (this.isHost && (packet.type === 'MESSAGE' || packet.type === 'TYPING')) {
-        this.connections.forEach((c, peerId) => {
-          if (peerId !== packet.senderId && c.open) {
-            c.send(packet);
-          }
-        });
-      }
-    });
-
-    conn.on('close', () => {
-      const p = this.participants.get(conn.peer);
-      this.connections.delete(conn.peer);
-      this.participants.delete(conn.peer);
-      this.broadcastParticipants();
+      const p = this.participants.get(packet.senderId);
+      this.participants.delete(packet.senderId);
+      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
 
       if (p) {
-        const disconnectMessage: ChatMessage = {
+        const leaveMsg: ChatMessage = {
           id: `sys-${Date.now()}-${Math.random()}`,
           senderId: 'system',
           senderName: 'Sistema',
@@ -315,12 +194,11 @@ export class PeerChatController {
           type: 'system',
           content: `${p.name} se ha desconectado.`
         };
-        this.callbacks.onMessageReceived(disconnectMessage);
+        this.callbacks.onMessageReceived(leaveMsg);
       }
-    });
-  }
+      return;
+    }
 
-  private async handlePacket(packet: PeerPacket): Promise<void> {
     if (packet.type === 'ROOM_DESTROY') {
       this.callbacks.onRoomDestroyed();
       this.destroyRoomLocally();
@@ -336,18 +214,11 @@ export class PeerChatController {
       return;
     }
 
-    if (packet.type === 'PEER_LIST' && packet.participants) {
-      this.participants.clear();
-      packet.participants.forEach((p) => this.participants.set(p.id, p));
-      this.callbacks.onParticipantsUpdated(Array.from(this.participants.values()));
-      return;
-    }
-
     if (packet.type === 'MESSAGE' && packet.payload) {
       try {
         const decryptedJson = await decryptData(packet.payload as EncryptedPayload, this.passkey);
         const parsedMessage = JSON.parse(decryptedJson) as ChatMessage;
-        parsedMessage.isSelf = packet.senderId === this.peer?.id;
+        parsedMessage.isSelf = false;
         this.callbacks.onMessageReceived(parsedMessage);
       } catch {
         this.callbacks.onError('Mensaje recibido con clave de cifrado incompatible.');
@@ -355,42 +226,14 @@ export class PeerChatController {
     }
   }
 
-  private broadcastParticipants(): void {
-    const list = Array.from(this.participants.values());
-    this.callbacks.onParticipantsUpdated(list);
-
-    const packet: PeerPacket = {
-      type: 'PEER_LIST',
-      senderId: this.peer?.id || '',
-      participants: list,
-      timestamp: Date.now()
-    };
-
-    this.connections.forEach((c) => {
-      if (c.open) {
-        c.send(packet);
-      }
-    });
-  }
-
   sendTypingStatus(isTyping: boolean): void {
-    const packet: PeerPacket = {
+    this.publishPacket({
       type: 'TYPING',
-      senderId: this.peer?.id || 'self',
+      senderId: this.clientId,
       senderName: this.username,
       isTyping,
       timestamp: Date.now()
-    };
-
-    if (this.isHost) {
-      this.connections.forEach((c) => {
-        if (c.open) {
-          c.send(packet);
-        }
-      });
-    } else if (this.hostConnection && this.hostConnection.open) {
-      this.hostConnection.send(packet);
-    }
+    });
   }
 
   async sendMessage(
@@ -401,7 +244,7 @@ export class PeerChatController {
   ): Promise<ChatMessage> {
     const message: ChatMessage = {
       id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-      senderId: this.peer?.id || 'self',
+      senderId: this.clientId,
       senderName: this.username,
       timestamp: Date.now(),
       type,
@@ -413,71 +256,46 @@ export class PeerChatController {
 
     const encrypted = await encryptData(JSON.stringify(message), this.passkey);
 
-    const packet: PeerPacket = {
+    this.publishPacket({
       type: 'MESSAGE',
-      senderId: this.peer?.id || '',
+      senderId: this.clientId,
       senderName: this.username,
       payload: encrypted,
       timestamp: Date.now()
-    };
-
-    if (this.isHost) {
-      this.connections.forEach((c) => {
-        if (c.open) {
-          c.send(packet);
-        }
-      });
-    } else if (this.hostConnection && this.hostConnection.open) {
-      this.hostConnection.send(packet);
-    }
+    });
 
     return message;
   }
 
   destroyRoom(): void {
-    const packet: PeerPacket = {
+    this.publishPacket({
       type: 'ROOM_DESTROY',
-      senderId: this.peer?.id || '',
+      senderId: this.clientId,
       timestamp: Date.now()
-    };
-
-    if (this.isHost) {
-      this.connections.forEach((c) => {
-        if (c.open) {
-          try {
-            c.send(packet);
-          } catch {}
-        }
-      });
-    } else if (this.hostConnection && this.hostConnection.open) {
-      try {
-        this.hostConnection.send(packet);
-      } catch {}
-    }
-
+    });
     this.destroyRoomLocally();
   }
 
   destroyRoomLocally(): void {
-    this.connections.forEach((conn) => {
+    if (this.client) {
       try {
-        conn.close();
+        this.client.publish(
+          this.topic,
+          JSON.stringify({
+            type: 'USER_LEAVE',
+            senderId: this.clientId,
+            senderName: this.username,
+            timestamp: Date.now()
+          }),
+          { qos: 0 }
+        );
       } catch {}
-    });
-    this.connections.clear();
 
-    if (this.hostConnection) {
       try {
-        this.hostConnection.close();
+        this.client.unsubscribe(this.topic);
+        this.client.end(true);
       } catch {}
-      this.hostConnection = null;
-    }
-
-    if (this.peer) {
-      try {
-        this.peer.destroy();
-      } catch {}
-      this.peer = null;
+      this.client = null;
     }
 
     this.participants.clear();
