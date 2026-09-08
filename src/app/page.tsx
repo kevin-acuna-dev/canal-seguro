@@ -45,13 +45,17 @@ export default function Home() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const userProfileRef = useRef<UserProfile | null>(null);
+  userProfileRef.current = userProfile;
+  const initialMountProcessedRef = useRef(false);
+
   const handleJoinRoom = useCallback(async (
     roomId: string,
     passkey: string,
     hostMode: boolean,
     profileOverride?: UserProfile
   ): Promise<void> => {
-    const activeUser = profileOverride || userProfile;
+    const activeUser = profileOverride || userProfileRef.current;
     if (!activeUser) return;
 
     setIsLoading(true);
@@ -126,41 +130,43 @@ export default function Home() {
       const msg = err instanceof Error ? err.message : 'Error al conectar con la sala';
       addToast(msg, 'error');
     }
-  }, [userProfile, addToast]);
+  }, [addToast]);
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      let detectedRoom = '';
-      let detectedKey = '';
+    if (initialMountProcessedRef.current || typeof window === 'undefined') return;
+    initialMountProcessedRef.current = true;
 
-      const searchParams = new URLSearchParams(window.location.search);
-      detectedRoom = searchParams.get('room') || '';
-      detectedKey = searchParams.get('key') || '';
+    let detectedRoom = '';
+    let detectedKey = '';
 
-      if (!detectedRoom && window.location.hash) {
-        const hashParams = new URLSearchParams(window.location.hash.replace('#', ''));
-        detectedRoom = hashParams.get('room') || '';
-        detectedKey = hashParams.get('key') || '';
-      }
+    const searchParams = new URLSearchParams(window.location.search);
+    detectedRoom = searchParams.get('room') || '';
+    detectedKey = searchParams.get('key') || '';
 
-      if (detectedRoom) {
-        setInviteRoomId(detectedRoom.toUpperCase());
-      }
-      if (detectedKey) {
-        setInvitePasskey(detectedKey);
-      }
+    if (!detectedRoom && window.location.hash) {
+      const hashParams = new URLSearchParams(window.location.hash.replace('#', ''));
+      detectedRoom = hashParams.get('room') || '';
+      detectedKey = hashParams.get('key') || '';
+    }
 
-      const savedUser = sessionStorage.getItem('canal_seguro_user');
-      if (savedUser) {
-        try {
-          const parsed = JSON.parse(savedUser);
-          setUserProfile(parsed);
+    if (detectedRoom) {
+      setInviteRoomId(detectedRoom.toUpperCase());
+    }
+    if (detectedKey) {
+      setInvitePasskey(detectedKey);
+    }
 
-          if (detectedRoom && detectedKey) {
-            handleJoinRoom(detectedRoom.toUpperCase(), detectedKey, false, parsed);
-          }
-        } catch {}
-      }
+    const savedUser = sessionStorage.getItem('canal_seguro_user');
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser) as UserProfile;
+        setUserProfile(parsed);
+        userProfileRef.current = parsed;
+
+        if (detectedRoom && detectedKey) {
+          handleJoinRoom(detectedRoom.toUpperCase(), detectedKey, false, parsed);
+        }
+      } catch {}
     }
   }, [handleJoinRoom]);
 

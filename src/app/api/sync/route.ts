@@ -12,7 +12,7 @@ interface RoomPacket {
   senderId: string;
   senderName?: string;
   type: string;
-  payload?: any;
+  payload?: unknown;
   timestamp: number;
   isTyping?: boolean;
 }
