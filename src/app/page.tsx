@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ChatMessage, Participant, ToastMessage } from '@/types/chat';
+import { ChatMessage, Participant, ToastMessage, UserProfile } from '@/types/chat';
 import { PeerChatController } from '@/controllers/PeerChatController';
+import { LoginScreen } from '@/components/LoginScreen';
 import { RoomLobby } from '@/components/RoomLobby';
 import { ChatRoom } from '@/components/ChatRoom';
 import { NotificationToast } from '@/components/NotificationToast';
@@ -10,11 +11,12 @@ import { Modal } from '@/components/Modal';
 import { ImageViewer } from '@/components/ImageViewer';
 
 export default function Home() {
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
-  const [currentUsername, setCurrentUsername] = useState<string>('');
   const [isHost, setIsHost] = useState<boolean>(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const [typingUsers, setTypingUsers] = useState<Map<string, string>>(new Map());
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isDestroyModalOpen, setIsDestroyModalOpen] = useState<boolean>(false);
@@ -22,6 +24,7 @@ export default function Home() {
   const [initialRoomQuery, setInitialRoomQuery] = useState<string>('');
 
   const chatControllerRef = useRef<PeerChatController | null>(null);
+  const typingTimeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' | 'warning' = 'info') => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
@@ -38,6 +41,13 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const savedUser = sessionStorage.getItem('canal_seguro_user');
+      if (savedUser) {
+        try {
+          setUserProfile(JSON.parse(savedUser));
+        } catch {}
+      }
+
       const params = new URLSearchParams(window.location.search);
       const room = params.get('room');
       if (room) {
@@ -46,12 +56,67 @@ export default function Home() {
     }
   }, []);
 
+  const handleLogin = (profile: UserProfile) => {
+    setUserProfile(profile);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('canal_seguro_user', JSON.stringify(profile));
+    }
+    addToast(`Bienvenido, ${profile.username}. Sesión iniciada localmente.`, 'success');
+  };
+
+  const handleLogout = () => {
+    if (chatControllerRef.current) {
+      chatControllerRef.current.destroyRoomLocally();
+      chatControllerRef.current = null;
+    }
+    setUserProfile(null);
+    setActiveRoomId(null);
+    setMessages([]);
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('canal_seguro_user');
+    }
+    addToast('Sesión cerrada.', 'info');
+  };
+
+  const handleTypingStateChanged = useCallback((senderId: string, senderName: string, isTyping: boolean) => {
+    const existingTimeout = typingTimeoutsRef.current.get(senderId);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+      typingTimeoutsRef.current.delete(senderId);
+    }
+
+    if (isTyping) {
+      setTypingUsers((prev) => {
+        const next = new Map(prev);
+        next.set(senderId, senderName);
+        return next;
+      });
+
+      const timeout = setTimeout(() => {
+        setTypingUsers((prev) => {
+          const next = new Map(prev);
+          next.delete(senderId);
+          return next;
+        });
+        typingTimeoutsRef.current.delete(senderId);
+      }, 3000);
+
+      typingTimeoutsRef.current.set(senderId, timeout);
+    } else {
+      setTypingUsers((prev) => {
+        const next = new Map(prev);
+        next.delete(senderId);
+        return next;
+      });
+    }
+  }, []);
+
   const handleJoinRoom = async (
     roomId: string,
     passkey: string,
-    username: string,
     hostMode: boolean
   ): Promise<void> => {
+    if (!userProfile) return;
     setIsLoading(true);
 
     try {
@@ -62,9 +127,11 @@ export default function Home() {
         onParticipantsUpdated: (updatedList) => {
           setParticipants(updatedList);
         },
+        onTypingStateChanged: handleTypingStateChanged,
         onRoomDestroyed: () => {
           setMessages([]);
           setActiveRoomId(null);
+          setTypingUsers(new Map());
           addToast('La sala y sus mensajes han sido destruidos por el anfitrión.', 'warning');
         },
         onError: (errText) => {
@@ -73,7 +140,6 @@ export default function Home() {
         },
         onConnected: () => {
           setActiveRoomId(roomId);
-          setCurrentUsername(username);
           setIsHost(hostMode);
           setIsLoading(false);
           addToast(
@@ -84,7 +150,7 @@ export default function Home() {
       });
 
       chatControllerRef.current = controller;
-      await controller.initialize(roomId, passkey, username, hostMode);
+      await controller.initialize(roomId, passkey, userProfile.username, hostMode);
     } catch (err) {
       setIsLoading(false);
       const msg = err instanceof Error ? err.message : 'Error de enlace';
@@ -103,6 +169,12 @@ export default function Home() {
     setMessages((prev) => [...prev, sentMsg]);
   };
 
+  const handleSendTypingStatus = (isTyping: boolean) => {
+    if (chatControllerRef.current) {
+      chatControllerRef.current.sendTypingStatus(isTyping);
+    }
+  };
+
   const handleConfirmDestroyRoom = () => {
     setIsDestroyModalOpen(false);
     if (chatControllerRef.current) {
@@ -111,6 +183,7 @@ export default function Home() {
     }
     setMessages([]);
     setActiveRoomId(null);
+    setTypingUsers(new Map());
     addToast('Sala destruida. Todos los datos fueron eliminados de la memoria.', 'info');
   };
 
@@ -121,6 +194,7 @@ export default function Home() {
     }
     setMessages([]);
     setActiveRoomId(null);
+    setTypingUsers(new Map());
     addToast('Has abandonado la sala.', 'info');
   };
 
@@ -131,9 +205,13 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col justify-center">
-      {!activeRoomId ? (
+      {!userProfile ? (
+        <LoginScreen onLogin={handleLogin} isLoading={isLoading} />
+      ) : !activeRoomId ? (
         <div className="p-4 sm:p-6 w-full flex items-center justify-center">
           <RoomLobby
+            userProfile={userProfile}
+            onLogout={handleLogout}
             onJoinRoom={handleJoinRoom}
             isLoading={isLoading}
             initialRoomId={initialRoomQuery}
@@ -142,11 +220,13 @@ export default function Home() {
       ) : (
         <ChatRoom
           roomId={activeRoomId}
-          username={currentUsername}
+          username={userProfile.username}
           isHost={isHost}
           participants={participants}
           messages={messages}
+          typingUsers={Array.from(typingUsers.values())}
           onSendMessage={handleSendMessage}
+          onSendTypingStatus={handleSendTypingStatus}
           onDestroyRoom={() => setIsDestroyModalOpen(true)}
           onLeaveRoom={handleLeaveRoom}
           onClearLocalMessages={handleClearLocalMessages}

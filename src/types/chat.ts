@@ -22,6 +22,7 @@ export interface PeerPacket {
   senderName?: string;
   payload?: EncryptedPayload | string;
   participants?: Participant[];
+  isTyping?: boolean;
   timestamp: number;
 }
 
@@ -36,4 +37,16 @@ export interface ToastMessage {
   id: string;
   type: 'success' | 'error' | 'info' | 'warning';
   message: string;
+}
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  loggedInAt: number;
+}
+
+export interface TypingUser {
+  id: string;
+  name: string;
+  lastTyped: number;
 }

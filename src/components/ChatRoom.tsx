@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   ChatMessage,
   Participant
@@ -17,10 +17,12 @@ import {
   LogOut,
   Eraser,
   Lock,
-  Clock,
   Radio,
-  FileText
+  Pencil
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Avatar } from '@/components/ui/avatar';
 import { compressImage, VoiceRecorder } from '@/utils/media';
 
 interface ChatRoomProps {
@@ -29,7 +31,9 @@ interface ChatRoomProps {
   isHost: boolean;
   participants: Participant[];
   messages: ChatMessage[];
+  typingUsers: string[];
   onSendMessage: (content: string, type: 'text' | 'image' | 'audio', mediaName?: string, mediaSize?: number) => Promise<void>;
+  onSendTypingStatus: (isTyping: boolean) => void;
   onDestroyRoom: () => void;
   onLeaveRoom: () => void;
   onClearLocalMessages: () => void;
@@ -43,7 +47,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   isHost,
   participants,
   messages,
+  typingUsers,
   onSendMessage,
+  onSendTypingStatus,
   onDestroyRoom,
   onLeaveRoom,
   onClearLocalMessages,
@@ -55,31 +61,39 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [showParticipantsModal, setShowParticipantsModal] = useState(false);
-  const [autoDestructMinutes, setAutoDestructMinutes] = useState<number>(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const voiceRecorderRef = useRef<VoiceRecorder | null>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, typingUsers]);
 
-  useEffect(() => {
-    if (autoDestructMinutes > 0 && messages.length > 0) {
-      const now = Date.now();
-      const cutoff = now - autoDestructMinutes * 60 * 1000;
-      const hasOldMessages = messages.some((m) => m.type !== 'system' && m.timestamp < cutoff);
-      if (hasOldMessages) {
-        onClearLocalMessages();
-      }
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setInputText(value);
+
+    if (value.trim().length > 0) {
+      onSendTypingStatus(true);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        onSendTypingStatus(false);
+      }, 2500);
+    } else {
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      onSendTypingStatus(false);
     }
-  }, [autoDestructMinutes, messages, onClearLocalMessages]);
+  };
 
   const handleSendText = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!inputText.trim() || isSending) return;
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    onSendTypingStatus(false);
 
     const content = inputText.trim();
     setInputText('');
@@ -223,77 +237,80 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               <span className="text-xs font-mono font-bold tracking-widest text-zinc-200">
                 SALA: {roomId}
               </span>
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 border border-emerald-800/80 text-emerald-400">
+              <Badge variant="success" className="gap-1">
                 <Lock className="w-2.5 h-2.5" />
                 E2EE Activo
-              </span>
+              </Badge>
             </div>
-            <div className="text-[11px] text-zinc-400 flex items-center gap-1">
-              <Radio className="w-2.5 h-2.5 text-zinc-400" />
+            <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
+              <Radio className="w-2.5 h-2.5 text-emerald-400" />
               <span>{isHost ? 'Anfitrión' : 'Participante'}: {username}</span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="icon"
             onClick={handleCopyInviteLink}
-            className="p-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100 transition-colors"
             title="Copiar enlace de sala"
           >
             <Copy className="w-4 h-4" />
-          </button>
+          </Button>
 
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => setShowParticipantsModal(true)}
-            className="px-2.5 py-1.5 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100 transition-colors flex items-center gap-1.5 text-xs"
+            className="gap-1.5"
             title="Ver participantes"
           >
             <Users className="w-3.5 h-3.5" />
             <span>{participants.length}</span>
-          </button>
+          </Button>
 
-          <button
-            type="button"
+          <Button
+            variant="outline"
+            size="icon"
             onClick={onClearLocalMessages}
-            className="p-2 rounded-lg bg-zinc-800/80 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
-            title="Limpiar historial en pantalla"
+            title="Limpiar mensajes locales"
           >
             <Eraser className="w-4 h-4" />
-          </button>
+          </Button>
 
           {isHost ? (
-            <button
-              type="button"
+            <Button
+              variant="destructive"
+              size="sm"
               onClick={onDestroyRoom}
-              className="px-2.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800/60 text-rose-300 hover:text-rose-100 transition-colors flex items-center gap-1.5 text-xs font-semibold"
-              title="Destruir sala y eliminar todos los datos"
+              className="gap-1.5 font-semibold"
+              title="Destruir sala y borrar datos"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Destruir sala</span>
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
+            <Button
+              variant="outline"
+              size="sm"
               onClick={onLeaveRoom}
-              className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 transition-colors flex items-center gap-1.5 text-xs font-semibold"
+              className="gap-1.5"
               title="Salir de la sala"
             >
               <LogOut className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Salir</span>
-            </button>
+            </Button>
           )}
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3.5">
-        <div className="text-center my-3">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-400">
+        <div className="text-center my-2">
+          <Badge variant="outline" className="text-[11px] text-zinc-400 py-1 px-3 border-zinc-800 gap-1.5">
             <Lock className="w-3 h-3 text-zinc-400" />
-            Canal protegido con cifrado AES-256-GCM. Nada se guarda en servidores.
-          </div>
+            Cifrado AES-256-GCM directo en el navegador. Datos eliminados al salir.
+          </Badge>
         </div>
 
         {messages.length === 0 && (
@@ -301,7 +318,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             <ShieldCheck className="w-10 h-10 mb-2 stroke-1 text-zinc-600" />
             <p className="text-xs">No hay mensajes en esta sesión.</p>
             <p className="text-[11px] mt-1 text-zinc-400">
-              Escribe un texto o adjunta una imagen para comenzar de forma segura.
+              Escribe un texto o comparte una foto para iniciar la conversación cifrada.
             </p>
           </div>
         )}
@@ -325,6 +342,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               className={`flex flex-col ${isSelf ? 'items-end' : 'items-start'} max-w-full`}
             >
               <div className="flex items-center gap-2 mb-1 px-1">
+                {!isSelf && <Avatar name={msg.senderName} size="sm" />}
                 <span className="text-[11px] font-medium text-zinc-400">
                   {isSelf ? 'Tú' : msg.senderName}
                 </span>
@@ -373,6 +391,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </div>
           );
         })}
+
+        {typingUsers.length > 0 && (
+          <div className="flex items-center gap-2 px-2 py-1 text-xs text-zinc-400 animate-pulse">
+            <Pencil className="w-3 h-3 text-zinc-400" />
+            <span>
+              {typingUsers.join(', ')} {typingUsers.length === 1 ? 'está escribiendo...' : 'están escribiendo...'}
+            </span>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -381,24 +409,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           <div className="flex items-center justify-between p-2.5 bg-zinc-950 border border-rose-900/60 rounded-xl">
             <div className="flex items-center gap-3 text-rose-400 text-xs font-semibold px-2">
               <div className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
-              <span>Grabando audio: {formatSeconds(recordingSeconds)}</span>
+              <span>Grabando nota de voz: {formatSeconds(recordingSeconds)}</span>
             </div>
             <div className="flex items-center gap-2">
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="sm"
                 onClick={handleCancelVoice}
-                className="px-3 py-1 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors"
               >
                 Cancelar
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="destructive"
+                size="sm"
                 onClick={handleToggleRecordVoice}
-                className="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5"
+                className="gap-1.5"
               >
                 <Square className="w-3.5 h-3.5" />
                 Enviar nota
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
@@ -411,30 +442,32 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               className="hidden"
             />
 
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="icon"
               onClick={() => fileInputRef.current?.click()}
               disabled={isSending}
-              className="p-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors shrink-0 disabled:opacity-50"
               title="Adjuntar imagen"
             >
-              <ImageIcon className="w-5 h-5" />
-            </button>
+              <ImageIcon className="w-4 h-4" />
+            </Button>
 
-            <button
+            <Button
               type="button"
+              variant="outline"
+              size="icon"
               onClick={handleToggleRecordVoice}
               disabled={isSending}
-              className="p-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors shrink-0 disabled:opacity-50"
               title="Grabar nota de voz"
             >
-              <Mic className="w-5 h-5" />
-            </button>
+              <Mic className="w-4 h-4" />
+            </Button>
 
             <div className="flex-1 relative">
               <textarea
                 value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
+                onChange={handleTextChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 rows={1}
@@ -443,18 +476,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               />
             </div>
 
-            <button
+            <Button
               type="submit"
               disabled={!inputText.trim() || isSending}
-              className="p-2.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-semibold transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed shadow-md"
+              size="icon"
+              className="h-10 w-10 shrink-0"
               title="Enviar mensaje"
             >
               {isSending ? (
-                <div className="w-5 h-5 border-2 border-zinc-900/30 border-t-zinc-900 rounded-full animate-spin" />
+                <div className="w-4 h-4 border-2 border-zinc-900/30 border-t-zinc-900 rounded-full animate-spin" />
               ) : (
-                <Send className="w-5 h-5" />
+                <Send className="w-4 h-4" />
               )}
-            </button>
+            </Button>
           </form>
         )}
       </div>
@@ -481,26 +515,26 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                   key={p.id}
                   className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-950 border border-zinc-800/80 text-xs"
                 >
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <div className="flex items-center gap-2.5">
+                    <Avatar name={p.name} size="sm" />
                     <span className="font-medium text-zinc-200">{p.name}</span>
                   </div>
                   {p.isHost && (
-                    <span className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 font-mono">
+                    <Badge variant="secondary" className="text-[10px]">
                       Anfitrión
-                    </span>
+                    </Badge>
                   )}
                 </div>
               ))}
             </div>
             <div className="px-4 py-3 bg-zinc-950 border-t border-zinc-800 text-right">
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => setShowParticipantsModal(false)}
-                className="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs rounded-lg transition-colors"
               >
                 Cerrar
-              </button>
+              </Button>
             </div>
           </div>
         </div>

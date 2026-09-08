@@ -8,6 +8,7 @@ export interface ChatCallbacks {
   onRoomDestroyed: () => void;
   onError: (errorMessage: string) => void;
   onConnected: (peerId: string) => void;
+  onTypingStateChanged: (senderId: string, senderName: string, isTyping: boolean) => void;
 }
 
 export class PeerChatController {
@@ -184,7 +185,7 @@ export class PeerChatController {
 
       this.handlePacket(packet);
 
-      if (this.isHost && packet.type === 'MESSAGE') {
+      if (this.isHost && (packet.type === 'MESSAGE' || packet.type === 'TYPING')) {
         this.connections.forEach((c, peerId) => {
           if (peerId !== packet.senderId && c.open) {
             c.send(packet);
@@ -217,6 +218,15 @@ export class PeerChatController {
     if (packet.type === 'ROOM_DESTROY') {
       this.callbacks.onRoomDestroyed();
       this.destroyRoomLocally();
+      return;
+    }
+
+    if (packet.type === 'TYPING') {
+      this.callbacks.onTypingStateChanged(
+        packet.senderId,
+        packet.senderName || 'Participante',
+        Boolean(packet.isTyping)
+      );
       return;
     }
 
@@ -255,6 +265,26 @@ export class PeerChatController {
         c.send(packet);
       }
     });
+  }
+
+  sendTypingStatus(isTyping: boolean): void {
+    const packet: PeerPacket = {
+      type: 'TYPING',
+      senderId: this.peer?.id || 'self',
+      senderName: this.username,
+      isTyping,
+      timestamp: Date.now()
+    };
+
+    if (this.isHost) {
+      this.connections.forEach((c) => {
+        if (c.open) {
+          c.send(packet);
+        }
+      });
+    } else if (this.hostConnection && this.hostConnection.open) {
+      this.hostConnection.send(packet);
+    }
   }
 
   async sendMessage(

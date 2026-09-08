@@ -2,6 +2,7 @@
 
 import React, { useEffect } from 'react';
 import { X, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface ModalProps {
   isOpen: boolean;
@@ -41,14 +42,14 @@ export const Modal: React.FC<ModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl w-full max-w-md shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
           <div className="flex items-center gap-2.5">
             {isDestructive && (
               <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0" />
             )}
-            <h3 className="font-semibold text-zinc-100 text-base">{title}</h3>
+            <h3 className="font-semibold text-zinc-100 text-sm">{title}</h3>
           </div>
           <button
             onClick={onClose}
@@ -60,35 +61,34 @@ export const Modal: React.FC<ModalProps> = ({
           </button>
         </div>
 
-        <div className="p-5 text-sm text-zinc-300">
-          {description && <p className="mb-3 leading-relaxed">{description}</p>}
+        <div className="p-5 text-xs text-zinc-300">
+          {description && <p className="mb-3 leading-relaxed text-zinc-400">{description}</p>}
           {children}
         </div>
 
         {(onConfirm || cancelText) && (
-          <div className="flex items-center justify-end gap-3 px-5 py-3.5 bg-zinc-950/60 border-t border-zinc-800">
-            <button
+          <div className="flex items-center justify-end gap-2.5 px-5 py-3.5 bg-zinc-950/60 border-t border-zinc-800">
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={onClose}
               disabled={isLoading}
-              className="px-4 py-2 text-xs font-medium text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 rounded-lg transition-colors"
             >
               {cancelText}
-            </button>
+            </Button>
             {onConfirm && (
-              <button
+              <Button
+                variant={isDestructive ? 'destructive' : 'default'}
+                size="sm"
                 onClick={onConfirm}
                 disabled={isLoading}
-                className={`px-4 py-2 text-xs font-medium rounded-lg text-white transition-colors flex items-center gap-2 ${
-                  isDestructive
-                    ? 'bg-rose-600 hover:bg-rose-700'
-                    : 'bg-zinc-700 hover:bg-zinc-600'
-                }`}
+                className="gap-2"
               >
                 {isLoading && (
                   <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 )}
                 {confirmText}
-              </button>
+              </Button>
             )}
           </div>
         )}
